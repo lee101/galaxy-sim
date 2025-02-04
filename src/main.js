@@ -292,7 +292,7 @@ const galaxy2 = createGalaxy("galaxy2", scene, new BABYLON.Vector3(-150, -30, 25
 
 // ===== PLANET GENERATION =====
 const planets = [];
-const numPlanets = 10;
+const numPlanets = 4000;
 const planetRadius = 2;
 const minPlanetDistance = 10;
 const maxPlanetDistance = 200;
@@ -386,6 +386,10 @@ function createPlanet(index, properties) {
             uniform vec3 seaColor;
             uniform float landPct;
             uniform float seed;
+            uniform float specularIntensity;
+            uniform float roughness;
+            uniform float cloudDensity;
+            uniform vec3 cloudColor;
             varying vec3 vPosition;
             
             // Simplex noise helper functions
@@ -454,12 +458,22 @@ function createPlanet(index, properties) {
                 float atmosphereGlow = smoothstep(0.9, 1.0, dot(normal, vec3(0.0, 0.0, 1.0)));
                 finalColor = mix(finalColor, atmosphereColor, atmosphere * atmosphereGlow);
                 
+                // Compute a specular highlight (simple approximation)
+                float spec = pow(max(dot(normal, vec3(0.0, 0.0, 1.0)), 0.0), roughness);
+                vec3 specularTerm = specularIntensity * spec * vec3(1.0);
+                finalColor += specularTerm;
+                
+                // Compute a cloud mask using noise for additional surface detail.
+                float cloudMask = perlinNoise(vPosition * 0.5, seed + 10.0);
+                cloudMask = smoothstep(cloudDensity - 0.1, cloudDensity + 0.1, cloudMask);
+                finalColor = mix(finalColor, cloudColor, cloudMask * 0.3);
+                
                 gl_FragColor = vec4(finalColor, 1.0);
             }
-        `,
+        `
     }, {
         attributes: ["position"],
-        uniforms: ["worldViewProjection", "time", "baseColor", "reflectance", "emission", "atmosphere", "atmosphereColor", "seaColor", "landPct", "seed"],
+        uniforms: ["worldViewProjection", "time", "baseColor", "reflectance", "emission", "atmosphere", "atmosphereColor", "seaColor", "landPct", "seed", "specularIntensity", "roughness", "cloudDensity", "cloudColor"],
     });
 
     planet.material = planetShader;
@@ -471,6 +485,10 @@ function createPlanet(index, properties) {
     planet.material.setColor3("atmosphereColor", properties.atmosphereColor);
     planet.material.setColor3("seaColor", properties.seaColor);
     planet.material.setFloat("landPct", properties.landPct);
+    planet.material.setFloat("specularIntensity", 0.5);
+    planet.material.setFloat("roughness", 16.0);
+    planet.material.setFloat("cloudDensity", 0.5);
+    planet.material.setVector3("cloudColor", new BABYLON.Vector3(0.8, 0.8, 0.8));
 
     // Clickable planets
     planet.actionManager = new BABYLON.ActionManager(scene);
