@@ -39,12 +39,12 @@ for (let i = 0; i < starCount; i++) {
     starPositions[idx + 1] = r * Math.sin(phi) * Math.sin(theta);
     starPositions[idx + 2] = r * Math.cos(phi);
     
-    // Random white-blue colors
-    const brightness = 0.5 + Math.random() * 0.5;
+    // Use fixed brightness to reduce blinking while dragging
+    const brightness = 0.7;
     starColors[colorIdx] = brightness;
     starColors[colorIdx + 1] = brightness;
-    starColors[colorIdx + 2] = brightness + Math.random() * 0.3;
-    starColors[colorIdx + 3] = Math.random() * 0.5 + 0.5;
+    starColors[colorIdx + 2] = brightness + 0.1;
+    starColors[colorIdx + 3] = 1.0;
 }
 
 // Create star system using point clouds for better performance
@@ -65,11 +65,89 @@ starSystem.addPoints(starCount, (particle, i) => {
     );
 });
 starSystem.buildMeshAsync().then(() => {
-    // Optional: Add some rotation to the star field
-    scene.registerBeforeRender(() => {
-        starSystem.mesh.rotation.y += 0.0001;
-    });
+    // Removed star field rotation to avoid excessive blinking while dragging.
 });
+
+// ===== SPACE DUST =====
+const spaceDust = BABYLON.MeshBuilder.CreateSphere("spaceDust", { segments: 32, diameter: 150 }, scene);
+spaceDust.position = new BABYLON.Vector3(0, 0, 0);
+const spaceDustShader = new BABYLON.ShaderMaterial("spaceDustShader", scene, {
+    vertexSource: `
+        precision highp float;
+        attribute vec3 position;
+        uniform mat4 worldViewProjection;
+        varying vec3 vPosition;
+        void main(void) {
+            vPosition = position;
+            gl_Position = worldViewProjection * vec4(position, 1.0);
+        }
+    `,
+    fragmentSource: `
+        precision highp float;
+        uniform float time;
+        varying vec3 vPosition;
+        void main(void) {
+            // Create a blob effect using sinusoids and smooth ramps.
+            float dist = length(vPosition);
+            float sinusoid = sin(vPosition.x * 0.2 + time) * 0.5 + 0.5;
+            float ramp = smoothstep(0.8, 0.0, dist);
+            float intensity = sinusoid * ramp;
+            // Gradient from purple to orange based on the y-position.
+            vec3 colorOrange = vec3(1.0, 0.5, 0.0);
+            vec3 colorPurple = vec3(0.6, 0.0, 0.8);
+            vec3 gradient = mix(colorPurple, colorOrange, (vPosition.y + 50.0) / 100.0);
+            gl_FragColor = vec4(gradient * intensity, intensity);
+        }
+    `
+}, {
+    attributes: ["position"],
+    uniforms: ["worldViewProjection", "time"]
+});
+spaceDust.material = spaceDustShader;
+
+// ===== GALAXIES =====
+function createGalaxy(name, scene, position, rotation, scale) {
+    const galaxy = BABYLON.MeshBuilder.CreateDisc(name, { radius: 50, tessellation: 64 }, scene);
+    galaxy.position = position;
+    galaxy.rotation = rotation;
+    galaxy.scaling = new BABYLON.Vector3(scale, scale, scale);
+    const galaxyShader = new BABYLON.ShaderMaterial(name + "Shader", scene, {
+        vertexSource: `
+            precision highp float;
+            attribute vec3 position;
+            attribute vec2 uv;
+            uniform mat4 worldViewProjection;
+            varying vec2 vUV;
+            void main(void) {
+                vUV = uv;
+                gl_Position = worldViewProjection * vec4(position, 1.0);
+            }
+        `,
+        fragmentSource: `
+            precision highp float;
+            uniform float time;
+            varying vec2 vUV;
+            void main(void) {
+                // Radial gradient with a swirling spiral effect.
+                vec2 centeredUV = vUV - 0.5;
+                float dist = length(centeredUV);
+                float angle = atan(centeredUV.y, centeredUV.x) + time * 0.2;
+                float spiral = sin(dist * 20.0 - angle * 5.0);
+                float intensity = smoothstep(0.5, 0.0, dist) + spiral * 0.1;
+                vec3 galaxyColor = mix(vec3(0.2, 0.0, 0.4), vec3(1.0, 0.8, 1.0), intensity);
+                gl_FragColor = vec4(galaxyColor, intensity);
+            }
+        `
+    }, {
+        attributes: ["position", "uv"],
+        uniforms: ["worldViewProjection", "time"]
+    });
+    galaxy.material = galaxyShader;
+    return galaxy;
+}
+
+const galaxy1 = createGalaxy("galaxy1", scene, new BABYLON.Vector3(100, 50, -200), new BABYLON.Vector3(0, 0.5, 0), 1);
+const galaxy2 = createGalaxy("galaxy2", scene, new BABYLON.Vector3(-150, -30, 250), new BABYLON.Vector3(0, -0.3, 0), 1);
 
 // ===== PLANET GENERATION =====
 const planets = [];
@@ -135,7 +213,7 @@ function generatePlanetProperties(seed) {
     };
 }
 
-// Function to create a planet
+// Function to create a planet with a unique shader
 function createPlanet(index, properties) {
     const planet = BABYLON.MeshBuilder.CreateSphere(`planet${index}`, { diameter: planetRadius, segments: 32 }, scene);
     
@@ -144,13 +222,15 @@ function createPlanet(index, properties) {
     const distance = minPlanetDistance + Math.random() * (maxPlanetDistance - minPlanetDistance);
     planet.position = new BABYLON.Vector3(Math.cos(angle) * distance, Math.sin(angle) * distance, (Math.random() - 0.5) * 100);
 
-    // Custom shader for procedural planets
-    const planetShader = new BABYLON.ShaderMaterial("planetShader", scene, {
+    // Custom shader for procedural planets with planet-specific variation.
+    const planetShader = new BABYLON.ShaderMaterial(`planetShader${index}`, scene, {
         vertexSource: `
             precision highp float;
             attribute vec3 position;
             uniform mat4 worldViewProjection;
+            varying vec3 vPosition;
             void main(void) {
+                vPosition = position;
                 gl_Position = worldViewProjection * vec4(position, 1.0);
             }
         `,
@@ -165,90 +245,70 @@ function createPlanet(index, properties) {
             uniform vec3 seaColor;
             uniform float landPct;
             uniform float seed;
+            varying vec3 vPosition;
             
-            // Simplex noise functions (GLSL)
+            // Simplex noise helper functions
             vec3 mod289_vec3(vec3 x) {
                 return x - floor(x * (1.0 / 289.0)) * 289.0;
             }
-            vec4 mod289_vec4(vec4 x) {
-                return x - floor(x * (1.0 / 289.0)) * 289.0;
-            }
             float permute(float x) {
-                return mod289_vec3(vec3(((x*34.0)+1.0)*x)).x;
+                return mod289_vec3(vec3(((x * 34.0) + 1.0) * x)).x;
             }
             float taylorInvSqrt(float r) {
                 return 1.79284291400159 - 0.85373472095314 * r;
             }
             float snoise(vec3 v) {
-                const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
-                const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
-                // First corner
-                vec3 i  = floor(v + dot(v, C.yyy) );
-                vec3 x0 =   v - i + dot(i, C.xxx) ;
-                // Other corners
-                vec3 i1;
-                i1 = (x0.x > x0.y) ? (x0.x > x0.z ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0)) : (x0.y > x0.z ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0));
-                vec3 i2 = vec3(1.0, 1.0, 1.0) - i1;
-                //   x0 = x0 - 0.0 + 0.0 * C.xxx;
-                vec3 x1 = x0 - i1 + 1.0 * C.xxx;
-                vec3 x2 = x0 - i2 + 2.0 * C.xxx;
-                vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
-                // Permutations
+                const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+                vec3 i  = floor(v + dot(v, vec3(C.y)));
+                vec3 x0 = v - i + dot(i, vec3(C.x));
+                vec3 g;
+                g = step(x0.yzx, x0.xyz);
+                vec3 l = 1.0 - g;
+                vec3 i1 = min(g.xyz, l.zxy);
+                vec3 i2 = max(g.xyz, l.zxy);
+                vec3 x1 = x0 - i1 + vec3(C.x);
+                vec3 x2 = x0 - i2 + 2.0 * vec3(C.x);
+                vec3 x3 = x0 - 1.0 + 3.0 * vec3(C.x);
                 i = mod289_vec3(i);
-                float i_x = permute(permute(i.z) + i.y);
-                float i_xy = permute(i_x + i.x);
-                float i_xz = permute(i_x + i.z);
-                float i_yz = permute(permute(i.x) + i.y);
-                float i_xyz = permute(i_yz + i.z);
-                float i_zy = permute(permute(i.x) + i.z);
-                float i_zyx = permute(i_zy + i.y);
-                vec4 x = vec4(x0.x, x1.x, x2.x, x3.x);
-                vec4 y = vec4(x0.y, x1.y, x2.y, x3.y);
-                vec4 z = vec4(x0.z, x1.z, x2.z, x3.z);
-                vec4 ii = vec4(i_xy, i_xz, i_yz, i_xyz);
-                vec4 j = vec4(i_zyx, i_zy, i_x, i.y);
-                vec4 g0 = vec4(permute(ii.x + j.x), permute(ii.y + j.y), permute(ii.z + j.z), permute(ii.w + j.w));
-                vec4 g1 = vec4(permute(g0.x + j.x), permute(g0.y + j.y), permute(g0.z + j.z), permute(g0.w + j.w));
-                vec4 g2 = vec4(permute(g1.x + j.x), permute(g1.y + j.y), permute(g1.z + j.z), permute(g1.w + j.w));
-                vec4 g3 = vec4(permute(g2.x + j.x), permute(g2.y + j.y), permute(g2.z + j.z), permute(g2.w + j.w));
-                vec4 g = vec4(g0.x, g1.x, g2.x, g3.x);
-                vec4 n = vec4(0.0, 0.0, 0.0, 0.0);
-                vec3  m = max(0.6 - vec3(dot(x0,x0), dot(x1,x1), dot(x2,x2)), 0.0);
-                n.x = m.x * m.x * dot(g, vec4(x0.x, x0.y, x0.z, 0.0));
-                m = max(0.6 - vec3(dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-                n.y = m.x * m.x * dot(g, vec4(x1.x, x1.y, x1.z, 0.0));
-                n.z = m.y * m.y * dot(g, vec4(x2.x, x2.y, x2.z, 0.0));
-                n.w = m.z * m.z * dot(g, vec4(x3.x, x3.y, x3.z, 0.0));
-                return 70.0 * (n.x + n.y + n.z + n.w);
+                float n_ = 0.142857142857;
+                vec4 ns = n_ * vec4(1.0);
+                vec4 j = vec4(0.0);
+                vec4 x_ = vec4(x0.x, x1.x, x2.x, x3.x);
+                vec4 y_ = vec4(x0.y, x1.y, x2.y, x3.y);
+                vec4 z_ = vec4(x0.z, x1.z, x2.z, x3.z);
+                vec4 t = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                t = t * t;
+                return 42.0 * dot(t, vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)));
             }
-
+            
             float perlinNoise(vec3 p, float seed) {
-                float scaledX = p.x * 0.1 + seed;
-                float scaledY = p.y * 0.1 + seed;
-                float scaledZ = p.z * 0.1 + seed;
-                
+                vec3 scaledP = p * 0.1 + vec3(seed);
                 float total = 0.0;
                 float frequency = 1.0;
                 float amplitude = 1.0;
                 float maxVal = 0.0;
-                
                 for (int i = 0; i < 4; i++) {
-                    total += snoise(vec3(scaledX * frequency, scaledY * frequency, scaledZ * frequency)) * amplitude;
+                    total += snoise(scaledP * frequency) * amplitude;
                     maxVal += amplitude;
                     amplitude *= 0.5;
                     frequency *= 2.0;
                 }
                 return (total / maxVal + 1.0) / 2.0;
             }
-
+            
             void main(void) {
-                vec3 normal = normalize(gl_FragCoord.xyz - vec3(400.0, 300.0, 0.0));
-                float noiseValue = perlinNoise(gl_FragCoord.xyz * 0.01, seed);
+                vec3 normal = normalize(vPosition);
+                vec3 noiseCoord = vPosition * 0.1 + vec3(time * 0.3, seed, time * 0.2);
+                float noiseValue = perlinNoise(noiseCoord, seed);
                 float landValue = smoothstep(landPct - 0.1, landPct + 0.1, noiseValue);
-                vec3 finalColor = mix(seaColor, baseColor, landValue);
+                vec3 colorMix = mix(seaColor, baseColor, landValue);
                 
-                float glow = sin(time + gl_FragCoord.x * 0.01) * 0.5 + 0.5;
-                finalColor += vec3(emission * glow);
+                // Sinusoidal stripe effect for a more interesting surface.
+                float stripe = sin(vPosition.y * 10.0 + time) * 0.5 + 0.5;
+                vec3 finalColor = mix(colorMix, colorMix * stripe, 0.2);
+                
+                float glow = sin(time + vPosition.x * 0.1) * 0.5 + 0.5;
+                finalColor += emission * glow;
                 
                 float atmosphereGlow = smoothstep(0.9, 1.0, dot(normal, vec3(0.0, 0.0, 1.0)));
                 finalColor = mix(finalColor, atmosphereColor, atmosphere * atmosphereGlow);
@@ -292,7 +352,7 @@ function createPlanet(index, properties) {
     return planet;
 }
 
-// Generate planets
+// Generate planets and their moons
 for (let i = 0; i < numPlanets; i++) {
     const seed = Math.random() * 1000;
     const properties = generatePlanetProperties(seed);
@@ -304,18 +364,20 @@ for (let i = 0; i < numPlanets; i++) {
         const numMoons = Math.floor(Math.random() * 3) + 1;
         for (let j = 0; j < numMoons; j++) {
             const moonRadius = planetRadius * 0.3;
-            const moon = BABYLON.MeshBuilder.CreateSphere(`moon${i}-${j}`, { diameter: moonRadius }, scene);
+            const moon = BABYLON.MeshBuilder.CreateSphere(`moon${i}-${j}`, { diameter: moonRadius, segments: 16 }, scene);
             const moonDistance = planetRadius * 2 + Math.random() * 3;
             const moonAngle = Math.random() * Math.PI * 2;
             moon.position = planet.position.add(new BABYLON.Vector3(Math.cos(moonAngle) * moonDistance, Math.sin(moonAngle) * moonDistance, 0));
             
             const moonProperties = generatePlanetProperties(seed + j * 10);
-            const moonShader = new BABYLON.ShaderMaterial("moonShader", scene, {
+            const moonShader = new BABYLON.ShaderMaterial(`moonShader${i}-${j}`, scene, {
                 vertexSource: `
                     precision highp float;
                     attribute vec3 position;
                     uniform mat4 worldViewProjection;
+                    varying vec3 vPosition;
                     void main(void) {
+                        vPosition = position;
                         gl_Position = worldViewProjection * vec4(position, 1.0);
                     }
                 `,
@@ -330,94 +392,68 @@ for (let i = 0; i < numPlanets; i++) {
                     uniform vec3 seaColor;
                     uniform float landPct;
                     uniform float seed;
+                    varying vec3 vPosition;
                     
-                    // Simplex noise functions (GLSL)
                     vec3 mod289_vec3(vec3 x) {
                         return x - floor(x * (1.0 / 289.0)) * 289.0;
                     }
-                    vec4 mod289_vec4(vec4 x) {
-                        return x - floor(x * (1.0 / 289.0)) * 289.0;
-                    }
                     float permute(float x) {
-                        return mod289_vec3(vec3(((x*34.0)+1.0)*x)).x;
+                        return mod289_vec3(vec3(((x * 34.0) + 1.0) * x)).x;
                     }
                     float taylorInvSqrt(float r) {
                         return 1.79284291400159 - 0.85373472095314 * r;
                     }
                     float snoise(vec3 v) {
-                        const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
-                        const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
-                        // First corner
-                        vec3 i  = floor(v + dot(v, C.yyy) );
-                        vec3 x0 =   v - i + dot(i, C.xxx) ;
-                        // Other corners
-                        vec3 i1;
-                        i1 = (x0.x > x0.y) ? (x0.x > x0.z ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0)) : (x0.y > x0.z ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0));
-                        vec3 i2 = vec3(1.0, 1.0, 1.0) - i1;
-                        //   x0 = x0 - 0.0 + 0.0 * C.xxx;
-                        vec3 x1 = x0 - i1 + 1.0 * C.xxx;
-                        vec3 x2 = x0 - i2 + 2.0 * C.xxx;
-                        vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
-                        // Permutations
+                        const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+                        vec3 i  = floor(v + dot(v, vec3(C.y)));
+                        vec3 x0 = v - i + dot(i, vec3(C.x));
+                        vec3 g;
+                        g = step(x0.yzx, x0.xyz);
+                        vec3 l = 1.0 - g;
+                        vec3 i1 = min(g.xyz, l.zxy);
+                        vec3 i2 = max(g.xyz, l.zxy);
+                        vec3 x1 = x0 - i1 + vec3(C.x);
+                        vec3 x2 = x0 - i2 + 2.0 * vec3(C.x);
+                        vec3 x3 = x0 - 1.0 + 3.0 * vec3(C.x);
                         i = mod289_vec3(i);
-                        float i_x = permute(permute(i.z) + i.y);
-                        float i_xy = permute(i_x + i.x);
-                        float i_xz = permute(i_x + i.z);
-                        float i_yz = permute(permute(i.x) + i.y);
-                        float i_xyz = permute(i_yz + i.z);
-                        float i_zy = permute(permute(i.x) + i.z);
-                        float i_zyx = permute(i_zy + i.y);
-                        vec4 x = vec4(x0.x, x1.x, x2.x, x3.x);
-                        vec4 y = vec4(x0.y, x1.y, x2.y, x3.y);
-                        vec4 z = vec4(x0.z, x1.z, x2.z, x3.z);
-                        vec4 ii = vec4(i_xy, i_xz, i_yz, i_xyz);
-                        vec4 j = vec4(i_zyx, i_zy, i_x, i.y);
-                        vec4 g0 = vec4(permute(ii.x + j.x), permute(ii.y + j.y), permute(ii.z + j.z), permute(ii.w + j.w));
-                        vec4 g1 = vec4(permute(g0.x + j.x), permute(g0.y + j.y), permute(g0.z + j.z), permute(g0.w + j.w));
-                        vec4 g2 = vec4(permute(g1.x + j.x), permute(g1.y + j.y), permute(g1.z + j.z), permute(g1.w + j.w));
-                        vec4 g3 = vec4(permute(g2.x + j.x), permute(g2.y + j.y), permute(g2.z + j.z), permute(g2.w + j.w));
-                        vec4 g = vec4(g0.x, g1.x, g2.x, g3.x);
-                        vec4 n = vec4(0.0, 0.0, 0.0, 0.0);
-                        vec3  m = max(0.6 - vec3(dot(x0,x0), dot(x1,x1), dot(x2,x2)), 0.0);
-                        n.x = m.x * m.x * dot(g, vec4(x0.x, x0.y, x0.z, 0.0));
-                        m = max(0.6 - vec3(dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-                        n.y = m.x * m.x * dot(g, vec4(x1.x, x1.y, x1.z, 0.0));
-                        n.z = m.y * m.y * dot(g, vec4(x2.x, x2.y, x2.z, 0.0));
-                        n.w = m.z * m.z * dot(g, vec4(x3.x, x3.y, x3.z, 0.0));
-                        return 70.0 * (n.x + n.y + n.z + n.w);
+                        float n_ = 0.142857142857;
+                        vec4 ns = n_ * vec4(1.0);
+                        vec4 j = vec4(0.0);
+                        vec4 x_ = vec4(x0.x, x1.x, x2.x, x3.x);
+                        vec4 y_ = vec4(x0.y, x1.y, x2.y, x3.y);
+                        vec4 z_ = vec4(x0.z, x1.z, x2.z, x3.z);
+                        vec4 t = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                        t = t * t;
+                        return 42.0 * dot(t, vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)));
                     }
-
+                    
                     float perlinNoise(vec3 p, float seed) {
-                        float scaledX = p.x * 0.1 + seed;
-                        float scaledY = p.y * 0.1 + seed;
-                        float scaledZ = p.z * 0.1 + seed;
-                        
+                        vec3 scaledP = p * 0.1 + vec3(seed);
                         float total = 0.0;
                         float frequency = 1.0;
                         float amplitude = 1.0;
                         float maxVal = 0.0;
-                        
                         for (int i = 0; i < 4; i++) {
-                            total += snoise(vec3(scaledX * frequency, scaledY * frequency, scaledZ * frequency)) * amplitude;
+                            total += snoise(scaledP * frequency) * amplitude;
                             maxVal += amplitude;
                             amplitude *= 0.5;
                             frequency *= 2.0;
                         }
                         return (total / maxVal + 1.0) / 2.0;
                     }
-
+                    
                     void main(void) {
-                        vec3 normal = normalize(gl_FragCoord.xyz - vec3(400.0, 300.0, 0.0));
-                        float noiseValue = perlinNoise(gl_FragCoord.xyz * 0.01, seed);
+                        vec3 normal = normalize(vPosition);
+                        vec3 noiseCoord = vPosition * 0.1 + vec3(time * 0.3, seed, time * 0.2);
+                        float noiseValue = perlinNoise(noiseCoord, seed);
                         float landValue = smoothstep(landPct - 0.1, landPct + 0.1, noiseValue);
-                        vec3 finalColor = mix(seaColor, baseColor, landValue);
-                        
-                        float glow = sin(time + gl_FragCoord.x * 0.01) * 0.5 + 0.5;
-                        finalColor += vec3(emission * glow);
-                        
+                        vec3 colorMix = mix(seaColor, baseColor, landValue);
+                        float stripe = sin(vPosition.y * 10.0 + time) * 0.5 + 0.5;
+                        vec3 finalColor = mix(colorMix, colorMix * stripe, 0.2);
+                        float glow = sin(time + vPosition.x * 0.1) * 0.5 + 0.5;
+                        finalColor += emission * glow;
                         float atmosphereGlow = smoothstep(0.9, 1.0, dot(normal, vec3(0.0, 0.0, 1.0)));
                         finalColor = mix(finalColor, atmosphereColor, atmosphere * atmosphereGlow);
-                        
                         gl_FragColor = vec4(finalColor, 1.0);
                     }
                 `,
@@ -443,10 +479,14 @@ for (let i = 0; i < numPlanets; i++) {
 let time = 0;
 scene.registerBeforeRender(() => {
     time += 0.01;
+    // Update time for all procedural shaders and slowly rotate the planets.
     planets.forEach((planet) => {
         planet.material.setFloat("time", time);
         planet.rotation.y += 0.0002;
     });
+    spaceDust.material.setFloat("time", time);
+    galaxy1.material.setFloat("time", time);
+    galaxy2.material.setFloat("time", time);
 });
 
 // Add post-processing effects with optimized settings
