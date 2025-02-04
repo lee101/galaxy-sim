@@ -39,11 +39,11 @@ for (let i = 0; i < starCount; i++) {
     starPositions[idx + 1] = r * Math.sin(phi) * Math.sin(theta);
     starPositions[idx + 2] = r * Math.cos(phi);
     
-    // Use fixed brightness to reduce blinking while dragging
-    const brightness = 0.7;
+    // Use random brightness for a twinkling effect
+    const brightness = 0.5 + Math.random() * 0.5;
     starColors[colorIdx] = brightness;
     starColors[colorIdx + 1] = brightness;
-    starColors[colorIdx + 2] = brightness + 0.1;
+    starColors[colorIdx + 2] = brightness;
     starColors[colorIdx + 3] = 1.0;
 }
 
@@ -67,43 +67,184 @@ starSystem.addPoints(starCount, (particle, i) => {
 starSystem.buildMeshAsync().then(() => {
     // Removed star field rotation to avoid excessive blinking while dragging.
 });
+function fract(x) {
+    return x - Math.floor(x);
+}
 
 // ===== SPACE DUST =====
-const spaceDust = BABYLON.MeshBuilder.CreateSphere("spaceDust", { segments: 32, diameter: 150 }, scene);
-spaceDust.position = new BABYLON.Vector3(0, 0, 0);
-const spaceDustShader = new BABYLON.ShaderMaterial("spaceDustShader", scene, {
-    vertexSource: `
-        precision highp float;
-        attribute vec3 position;
-        uniform mat4 worldViewProjection;
-        varying vec3 vPosition;
-        void main(void) {
-            vPosition = position;
-            gl_Position = worldViewProjection * vec4(position, 1.0);
+let spaceDust; // Declare spaceDust in outer scope
+
+// Replacing sphere-based space dust with 500 triangles with ramped gradients
+{
+    const triangleCount = 6000;
+    const positions = [];
+    const colors = [];
+    const indices = [];
+    const uvs = []; // New array for UV coordinates
+    let vertexIndex = 0;
+    for (let i = 0; i < triangleCount; i++) {
+        // Base position on a spherical shell (radius between 300 and 500) with clustering via Perlin noise
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const radius = 300 + Math.random() * 200;
+        const noise3DForDust = createNoise3D(Math.random);
+        const noiseVal = noise3DForDust(theta, phi, 0.0);
+        const adjustedRadius = radius + noiseVal * 50.0;
+        const baseX = adjustedRadius * Math.sin(phi) * Math.cos(theta);
+        const baseY = adjustedRadius * Math.sin(phi) * Math.sin(theta);
+        const baseZ = adjustedRadius * Math.cos(phi);
+        
+        // Generate 3 vertices for this triangle with larger random offsets
+        for (let j = 0; j < 3; j++) {
+            const offsetX = (Math.random() - 0.5) * 10;
+            const offsetY = (Math.random() - 0.5) * 10;
+            const offsetZ = (Math.random() - 0.5) * 10;
+            const vx = baseX + offsetX;
+            const vy = baseY + offsetY;
+            const vz = baseZ + offsetZ;
+            positions.push(vx, vy, vz);
+            // Compute UV using vx and vy to yield more variation in the horizontal gradient
+            uvs.push(fract(vx / 50.0), fract(vy / 50.0));
         }
-    `,
-    fragmentSource: `
-        precision highp float;
-        uniform float time;
-        varying vec3 vPosition;
-        void main(void) {
-            // Create a blob effect using sinusoids and smooth ramps.
-            float dist = length(vPosition);
-            float sinusoid = sin(vPosition.x * 0.2 + time) * 0.5 + 0.5;
-            float ramp = smoothstep(0.8, 0.0, dist);
-            float intensity = sinusoid * ramp;
-            // Gradient from purple to orange based on the y-position.
-            vec3 colorOrange = vec3(1.0, 0.5, 0.0);
-            vec3 colorPurple = vec3(0.6, 0.0, 0.8);
-            vec3 gradient = mix(colorPurple, colorOrange, (vPosition.y + 50.0) / 100.0);
-            gl_FragColor = vec4(gradient * intensity, intensity);
-        }
-    `
-}, {
-    attributes: ["position"],
-    uniforms: ["worldViewProjection", "time"]
-});
-spaceDust.material = spaceDustShader;
+        
+        // Assign gradient colors: blue, purple, and a blended mix
+        colors.push(0.2, 0.4, 1.0, 1.0); // Blue
+        colors.push(0.6, 0.1, 0.8, 1.0); // Purple
+        colors.push(0.4, 0.25, 0.9, 1.0); // Mixed
+        
+        // Define indices for the triangle
+        indices.push(vertexIndex, vertexIndex + 1, vertexIndex + 2);
+        vertexIndex += 3;
+    }
+    
+    // Create custom mesh for space dust
+    spaceDust = new BABYLON.Mesh("spaceDust", scene);
+    const vertexData = new BABYLON.VertexData();
+    vertexData.positions = positions;
+    vertexData.indices = indices;
+    vertexData.colors = colors;
+    vertexData.uvs = uvs;  // Assign UVs for gradient
+    vertexData.applyToMesh(spaceDust, true);
+    
+    // Create shader material with extra params for space dust
+    const spaceDustShader = new BABYLON.ShaderMaterial("spaceDustShader", scene, {
+        vertexSource: `
+            precision highp float;
+            attribute vec3 position;
+            attribute vec2 uv;
+            uniform mat4 worldViewProjection;
+            varying vec2 vUV;
+            void main(void) {
+                vUV = uv;
+                gl_Position = worldViewProjection * vec4(position, 1.0);
+            }
+        `,
+        fragmentSource: `
+            precision highp float;
+            uniform float time;
+            uniform vec3 gradientStart;
+            uniform vec3 gradientEnd;
+            uniform float noiseFactor;
+            varying vec2 vUV;
+            
+            void main(void) {
+                // Calculate distance from the center of our UV space (assumed center at 0.5,0.5)
+                vec2 center = vec2(0.5, 0.5);
+                float d = distance(vUV, center);
+                
+                // Compute a time-dependent warp effect using both UV components
+                float warp = sin((vUV.x + vUV.y + time) * 10.0) * 0.5 + 0.5;
+                
+                // Mix the warp with the horizontal gradient based on the noise factor:
+                float mixFactor = mix(warp, vUV.x, noiseFactor);
+                
+                // The "warped" color is a mix between our two defined colors
+                vec3 warpedColor = mix(gradientStart, gradientEnd, mixFactor);
+                
+                // Near the edges (d approaching 0.5), enforce a linear ramp so that the dust is fully opaque
+                float edge = smoothstep(0.45, 0.5, d);
+                
+                // Final color blends the warped and linear gradient based on edge proximity
+                vec3 finalColor = mix(warpedColor, mix(gradientStart, gradientEnd, vUV.x), edge);
+                
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `
+    }, {
+        attributes: ["position", "uv"],
+        uniforms: ["worldViewProjection", "time", "gradientStart", "gradientEnd", "noiseFactor"]
+    });
+    spaceDust.material = spaceDustShader;
+    spaceDust.material.setVector3("gradientStart", new BABYLON.Vector3(0.843, 0.6235, 0.1647)); // #d79f2a (orange)
+    spaceDust.material.setVector3("gradientEnd", new BABYLON.Vector3(0.827, 0.2745, 0.4588));   // #d34675 (pink)
+    spaceDust.material.setFloat("noiseFactor", 0.5);
+}
+
+// ===== SUNS =====
+function createSun(name, scene, position, scale) {
+    const sun = BABYLON.MeshBuilder.CreateSphere(name, { segments: 32, diameter: 50 }, scene);
+    sun.position = position;
+    sun.scaling = new BABYLON.Vector3(scale, scale, scale);
+    
+    const sunShader = new BABYLON.ShaderMaterial(name + "Shader", scene, {
+        vertexSource: `
+            precision highp float;
+            attribute vec3 position;
+            attribute vec3 normal;
+            uniform mat4 worldViewProjection;
+            varying vec3 vPosition;
+            varying vec3 vNormal;
+            void main(void) {
+                vPosition = position;
+                vNormal = normalize(normal);
+                gl_Position = worldViewProjection * vec4(position, 1.0);
+            }
+        `,
+        fragmentSource: `
+            precision highp float;
+            uniform float time;
+            uniform vec3 accretionColor1;
+            uniform vec3 accretionColor2;
+            uniform float innerThreshold;
+            uniform float outerThreshold;
+            uniform float noiseIntensity;
+            uniform float swirlSpeed;
+            varying vec3 vPosition;
+            varying vec3 vNormal;
+            
+            void main(void) {
+                float r = length(vPosition);
+                // Compute normalized radial factor for the accretion disk:
+                float disk = smoothstep(innerThreshold, outerThreshold, r);
+                
+                // Compute swirling noise for a turbulent accretion effect:
+                float swirl = sin(time * swirlSpeed + r * 10.0 + dot(vPosition, vNormal)) * noiseIntensity;
+                
+                vec3 accretion = mix(accretionColor1, accretionColor2, (swirl + 1.0) * 0.5);
+                
+                // Final color: black at the center moving to the accretion color on the disk
+                vec3 finalColor = mix(vec3(0.0), accretion, disk);
+                
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `
+    }, {
+        attributes: ["position", "normal"],
+        uniforms: ["worldViewProjection", "time", "accretionColor1", "accretionColor2", "innerThreshold", "outerThreshold", "noiseIntensity", "swirlSpeed"]
+    });
+    
+    sun.material = sunShader;
+    sun.material.setVector3("accretionColor1", new BABYLON.Vector3(0.843, 0.6235, 0.1647)); // Orange accretion color (#d79f2a)
+    sun.material.setVector3("accretionColor2", new BABYLON.Vector3(0.827, 0.2745, 0.4588)); // Purple accretion color (#d34675)
+    sun.material.setFloat("innerThreshold", 10.0);
+    sun.material.setFloat("outerThreshold", 15.0);
+    sun.material.setFloat("noiseIntensity", 0.5);
+    sun.material.setFloat("swirlSpeed", 3.0);
+    
+    return sun;
+}
+
+const sun1 = createSun("sun1", scene, new BABYLON.Vector3(0, 100, -300), 1);
 
 // ===== GALAXIES =====
 function createGalaxy(name, scene, position, rotation, scale) {
@@ -487,6 +628,7 @@ scene.registerBeforeRender(() => {
     spaceDust.material.setFloat("time", time);
     galaxy1.material.setFloat("time", time);
     galaxy2.material.setFloat("time", time);
+    sun1.material.setFloat("time", time);
 });
 
 // Add post-processing effects with optimized settings
