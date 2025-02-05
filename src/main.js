@@ -21,7 +21,7 @@ const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(1, 1, 0)
 light.intensity = 0.7;
 
 // ===== OPTIMIZED STAR FIELD =====
-const starCount = 10000;
+const starCount = 1000;
 const starPositions = new Float32Array(starCount * 3);
 const starColors = new Float32Array(starCount * 4);
 
@@ -76,7 +76,7 @@ let spaceDust; // Declare spaceDust in outer scope
 
 // Replacing sphere-based space dust with 500 triangles with ramped gradients
 {
-    const triangleCount = 6000;
+    const triangleCount = 1500;
     const positions = [];
     const colors = [];
     const indices = [];
@@ -306,7 +306,7 @@ const galaxy2 = createGalaxy("galaxy2", scene, new BABYLON.Vector3(-150, -30, 25
 
 // ===== PLANET GENERATION =====
 const planets = [];
-const numPlanets = 4000;
+const numPlanets = 400;
 const planetRadius = 2;
 const minPlanetDistance = 10;
 const maxPlanetDistance = 200;
@@ -407,58 +407,60 @@ function createPlanet(index, properties) {
             uniform vec3 reflectionColor;
             uniform float specularIntensity;
             uniform float shininess;
-            // We keep the existing cloud parameters:
+            // Cloud parameters:
             uniform float cloudDensity;
             uniform vec3 cloudColor;
 
             varying vec3 vPosition;
 
-            // Assume perlinNoise function is defined (or imported) elsewhere.
+            // Define a simple noise function (using a fract-sine hack)
+            float myPerlinNoise(vec3 pos, float s) {
+                return fract(sin(dot(pos, vec3(12.9898,78.233,45.164)) + s) * 43758.5453123);
+            }
 
             void main(void) {
                 // Compute surface albedo by mixing baseColor and seaColor using a noise-driven land factor.
-                float nVal = perlinNoise(vPosition * 0.1 + vec3(time * 0.3, seed, time * 0.2), seed);
+                float nVal = myPerlinNoise(vPosition * 0.1 + vec3(time * 0.3, seed, time * 0.2), seed);
                 float landFactor = smoothstep(landPct - 0.1, landPct + 0.1, nVal);
                 vec3 albedo = mix(seaColor, baseColor, landFactor);
-
-                // Approximate normal for a sphere:
+                
+                // Approximate the normal:
                 vec3 N = normalize(vPosition);
-
                 // Light and view directions:
                 vec3 L = normalize(lightDir);
                 vec3 V = normalize(-vPosition);
                 vec3 H = normalize(L + V);
-
+                
                 // Diffuse term:
                 float NdotL = max(dot(N, L), 0.0);
                 vec3 diffuse = albedo * NdotL;
-
-                // Specular term using Blinn-Phong:
+                
+                // Specular (Blinn-Phong):
                 float NdotH = max(dot(N, H), 0.0);
-                vec3 specular = specularIntensity * pow(NdotH, shininess);
-
-                // Ambient term:
+                vec3 specular = vec3(specularIntensity * pow(NdotH, shininess));
+                
+                // Ambient:
                 vec3 ambient = ambientColor * albedo;
-
-                // Fresnel reflection factor via Schlick's approximation:
+                
+                // Fresnel reflection:
                 float fresnel = pow(1.0 - max(dot(V, N), 0.0), 5.0);
                 vec3 reflection = reflectionColor * fresnel;
-
-                // Emissive component for self-illumination:
-                vec3 emissive = emission * (sin(time + vPosition.x * 0.1) * 0.5 + 0.5);
-
+                
+                // Emissive component:
+                vec3 emissive = vec3(emission * (sin(time + vPosition.x * 0.1) * 0.5 + 0.5));
+                
                 // Combine PBR terms:
                 vec3 colorPBR = ambient + diffuse + specular + reflection + emissive;
-
-                // Atmosphere effect: blend in atmospheric color based on surface angle.
+                
+                // Atmosphere effect:
                 float atmGlow = smoothstep(0.9, 1.0, dot(N, vec3(0.0, 0.0, 1.0)));
                 colorPBR = mix(colorPBR, atmosphereColor, atmosphere * atmGlow);
-
+                
                 // Cloud detail using noise:
-                float cloudMask = perlinNoise(vPosition * 0.5, seed + 10.0);
+                float cloudMask = myPerlinNoise(vPosition * 0.5, seed + 10.0);
                 cloudMask = smoothstep(cloudDensity - 0.1, cloudDensity + 0.1, cloudMask);
                 colorPBR = mix(colorPBR, cloudColor, cloudMask * 0.3);
-
+                
                 gl_FragColor = vec4(colorPBR, 1.0);
             }
         `
@@ -648,17 +650,74 @@ pipeline.bloomWeight = 0.7;
 pipeline.bloomKernel = 32; // Reduced for better performance
 pipeline.bloomScale = 0.5;
 
-// Add SSAO using SSAO2RenderingPipeline (ensure to import/use it if needed)
+// Create the SSAO pipeline without automatically attaching it by passing an empty array.
 const ssaoPipeline = new BABYLON.SSAO2RenderingPipeline("ssao", scene, {
     ssaoRatio: 0.5,
     blurRatio: 1
-}, [camera]);
-scene.postProcessRenderPipelineManager.attachCamerasToRenderPipeline("ssao", camera);
+}, [], true);
+
+// Mark each internal SSAO post-process as reusable.
+if (ssaoPipeline._originalColorPostProcess) {
+    ssaoPipeline._originalColorPostProcess.reusable = true;
+}
+ssaoPipeline._ssaoPostProcess.reusable = true;
+ssaoPipeline._blurHPostProcess.reusable = true;
+ssaoPipeline._blurVPostProcess.reusable = true;
+ssaoPipeline._ssaoCombinePostProcess.reusable = true;
+
+// Now attach the pipeline by passing the camera inside an array.
+scene.postProcessRenderPipelineManager.attachCamerasToRenderPipeline("ssao", [camera]);
 
 // Add camera inertia for smooth movement
 camera.inertia = 0.9;
 camera.angularSensibilityX = 500;
 camera.angularSensibilityY = 500;
+
+// Add an additional star simulation layer with screenspace anti-aliasing.
+BABYLON.Effect.ShadersStore["starOverlayVertexShader"] = `
+  precision highp float;
+  attribute vec2 position;
+  varying vec2 vUV;
+  void main(void) {
+    vUV = (position + 1.0) * 0.5;
+    gl_Position = vec4(position, 0.0, 1.0);
+  }
+`;
+
+BABYLON.Effect.ShadersStore["starOverlayFragmentShader"] = `
+  precision highp float;
+  varying vec2 vUV;
+  uniform float time;
+
+  // Simple 2D random function.
+  float random (in vec2 st) {
+    return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+  }
+
+  void main(void) {
+    // Multiply UV by 10.0 and add a scaled time component for more variation.
+    float n = random(vUV * 10.0 + time * 0.1);
+    
+    // Increase the threshold to produce fewer illuminated pixels.
+    float threshold = 0.999;
+    float star = step(threshold, n);
+    
+    // Use a tight smoothing range to soften star edges.
+    float aa = smoothstep(0.0, 0.001, abs(n - threshold));
+    
+    // Scale down intensity to avoid over-bright output.
+    float intensity = star * aa * 0.3;
+    gl_FragColor = vec4(vec3(intensity), intensity);
+  }
+`;
+
+// // Create and attach the star overlay post-process.
+// const starOverlay = new BABYLON.PostProcess("starOverlay", "starOverlay", ["time"], null, 1.0, camera, BABYLON.Texture.BILINEAR_SAMPLINGMODE, engine, true);
+// starOverlay.onApply = function(effect) {
+//   effect.setFloat("time", time);
+// };
+// // Set additive blending for the star overlay
+// starOverlay.alphaMode = BABYLON.Engine.ALPHA_ADD;
 
 // Optimized render loop
 engine.runRenderLoop(() => {
