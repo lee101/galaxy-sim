@@ -252,6 +252,8 @@ function createGalaxy(name, scene, position, rotation, scale) {
     galaxy.position = position;
     galaxy.rotation = rotation;
     galaxy.scaling = new BABYLON.Vector3(scale, scale, scale);
+    // Make the galaxy always face the camera (billboard mode)
+    galaxy.billboardMode = BABYLON.AbstractMesh.BILLBOARDMODE_ALL;
     const galaxyShader = new BABYLON.ShaderMaterial(name + "Shader", scene, {
         vertexSource: `
             precision highp float;
@@ -268,13 +270,25 @@ function createGalaxy(name, scene, position, rotation, scale) {
             precision highp float;
             uniform float time;
             varying vec2 vUV;
+
+            // A simple 2D random function.
+            float random (in vec2 st) {
+                return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+            }
+
             void main(void) {
-                // Radial gradient with a swirling spiral effect.
                 vec2 centeredUV = vUV - 0.5;
-                float dist = length(centeredUV);
-                float angle = atan(centeredUV.y, centeredUV.x) + time * 0.2;
-                float spiral = sin(dist * 20.0 - angle * 5.0);
-                float intensity = smoothstep(0.5, 0.0, dist) + spiral * 0.1;
+                float r = length(centeredUV);
+                // Swirl: add time-dependent rotation
+                float angle = atan(centeredUV.y, centeredUV.x) + time * 0.5;
+                float swirl = sin(r * 20.0 - angle * 5.0);
+
+                // Layered noise
+                float n1 = random(vUV * 10.0 + time);
+                float n2 = random(vUV * 20.0 - time);
+                float noiseLayer = mix(n1, n2, 0.5);
+
+                float intensity = smoothstep(0.6, 0.0, r) + swirl * 0.1 + noiseLayer * 0.2;
                 vec3 galaxyColor = mix(vec3(0.2, 0.0, 0.4), vec3(1.0, 0.8, 1.0), intensity);
                 gl_FragColor = vec4(galaxyColor, intensity);
             }
@@ -386,94 +400,71 @@ function createPlanet(index, properties) {
             uniform vec3 seaColor;
             uniform float landPct;
             uniform float seed;
+
+            // New uniforms for PBR
+            uniform vec3 lightDir;
+            uniform vec3 ambientColor;
+            uniform vec3 reflectionColor;
             uniform float specularIntensity;
-            uniform float roughness;
+            uniform float shininess;
+            // We keep the existing cloud parameters:
             uniform float cloudDensity;
             uniform vec3 cloudColor;
+
             varying vec3 vPosition;
-            
-            // Simplex noise helper functions
-            vec3 mod289_vec3(vec3 x) {
-                return x - floor(x * (1.0 / 289.0)) * 289.0;
-            }
-            float permute(float x) {
-                return mod289_vec3(vec3(((x * 34.0) + 1.0) * x)).x;
-            }
-            float taylorInvSqrt(float r) {
-                return 1.79284291400159 - 0.85373472095314 * r;
-            }
-            float snoise(vec3 v) {
-                const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-                vec3 i  = floor(v + dot(v, vec3(C.y)));
-                vec3 x0 = v - i + dot(i, vec3(C.x));
-                vec3 g;
-                g = step(x0.yzx, x0.xyz);
-                vec3 l = 1.0 - g;
-                vec3 i1 = min(g.xyz, l.zxy);
-                vec3 i2 = max(g.xyz, l.zxy);
-                vec3 x1 = x0 - i1 + vec3(C.x);
-                vec3 x2 = x0 - i2 + 2.0 * vec3(C.x);
-                vec3 x3 = x0 - 1.0 + 3.0 * vec3(C.x);
-                i = mod289_vec3(i);
-                float n_ = 0.142857142857;
-                vec4 ns = n_ * vec4(1.0);
-                vec4 j = vec4(0.0);
-                vec4 x_ = vec4(x0.x, x1.x, x2.x, x3.x);
-                vec4 y_ = vec4(x0.y, x1.y, x2.y, x3.y);
-                vec4 z_ = vec4(x0.z, x1.z, x2.z, x3.z);
-                vec4 t = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-                t = t * t;
-                return 42.0 * dot(t, vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)));
-            }
-            
-            float perlinNoise(vec3 p, float seed) {
-                vec3 scaledP = p * 0.1 + vec3(seed);
-                float total = 0.0;
-                float frequency = 1.0;
-                float amplitude = 1.0;
-                float maxVal = 0.0;
-                for (int i = 0; i < 4; i++) {
-                    total += snoise(scaledP * frequency) * amplitude;
-                    maxVal += amplitude;
-                    amplitude *= 0.5;
-                    frequency *= 2.0;
-                }
-                return (total / maxVal + 1.0) / 2.0;
-            }
-            
+
+            // Assume perlinNoise function is defined (or imported) elsewhere.
+
             void main(void) {
-                vec3 normal = normalize(vPosition);
-                vec3 noiseCoord = vPosition * 0.1 + vec3(time * 0.3, seed, time * 0.2);
-                float noiseValue = perlinNoise(noiseCoord, seed);
-                float landValue = smoothstep(landPct - 0.1, landPct + 0.1, noiseValue);
-                vec3 colorMix = mix(seaColor, baseColor, landValue);
-                
-                // Sinusoidal stripe effect for a more interesting surface.
-                float stripe = sin(vPosition.y * 10.0 + time) * 0.5 + 0.5;
-                vec3 finalColor = mix(colorMix, colorMix * stripe, 0.2);
-                
-                float glow = sin(time + vPosition.x * 0.1) * 0.5 + 0.5;
-                finalColor += emission * glow;
-                
-                float atmosphereGlow = smoothstep(0.9, 1.0, dot(normal, vec3(0.0, 0.0, 1.0)));
-                finalColor = mix(finalColor, atmosphereColor, atmosphere * atmosphereGlow);
-                
-                // Compute a specular highlight (simple approximation)
-                float spec = pow(max(dot(normal, vec3(0.0, 0.0, 1.0)), 0.0), roughness);
-                vec3 specularTerm = specularIntensity * spec * vec3(1.0);
-                finalColor += specularTerm;
-                
-                // Compute a cloud mask using noise for additional surface detail.
+                // Compute surface albedo by mixing baseColor and seaColor using a noise-driven land factor.
+                float nVal = perlinNoise(vPosition * 0.1 + vec3(time * 0.3, seed, time * 0.2), seed);
+                float landFactor = smoothstep(landPct - 0.1, landPct + 0.1, nVal);
+                vec3 albedo = mix(seaColor, baseColor, landFactor);
+
+                // Approximate normal for a sphere:
+                vec3 N = normalize(vPosition);
+
+                // Light and view directions:
+                vec3 L = normalize(lightDir);
+                vec3 V = normalize(-vPosition);
+                vec3 H = normalize(L + V);
+
+                // Diffuse term:
+                float NdotL = max(dot(N, L), 0.0);
+                vec3 diffuse = albedo * NdotL;
+
+                // Specular term using Blinn-Phong:
+                float NdotH = max(dot(N, H), 0.0);
+                vec3 specular = specularIntensity * pow(NdotH, shininess);
+
+                // Ambient term:
+                vec3 ambient = ambientColor * albedo;
+
+                // Fresnel reflection factor via Schlick's approximation:
+                float fresnel = pow(1.0 - max(dot(V, N), 0.0), 5.0);
+                vec3 reflection = reflectionColor * fresnel;
+
+                // Emissive component for self-illumination:
+                vec3 emissive = emission * (sin(time + vPosition.x * 0.1) * 0.5 + 0.5);
+
+                // Combine PBR terms:
+                vec3 colorPBR = ambient + diffuse + specular + reflection + emissive;
+
+                // Atmosphere effect: blend in atmospheric color based on surface angle.
+                float atmGlow = smoothstep(0.9, 1.0, dot(N, vec3(0.0, 0.0, 1.0)));
+                colorPBR = mix(colorPBR, atmosphereColor, atmosphere * atmGlow);
+
+                // Cloud detail using noise:
                 float cloudMask = perlinNoise(vPosition * 0.5, seed + 10.0);
                 cloudMask = smoothstep(cloudDensity - 0.1, cloudDensity + 0.1, cloudMask);
-                finalColor = mix(finalColor, cloudColor, cloudMask * 0.3);
-                
-                gl_FragColor = vec4(finalColor, 1.0);
+                colorPBR = mix(colorPBR, cloudColor, cloudMask * 0.3);
+
+                gl_FragColor = vec4(colorPBR, 1.0);
             }
         `
     }, {
         attributes: ["position"],
-        uniforms: ["worldViewProjection", "time", "baseColor", "reflectance", "emission", "atmosphere", "atmosphereColor", "seaColor", "landPct", "seed", "specularIntensity", "roughness", "cloudDensity", "cloudColor"],
+        uniforms: ["worldViewProjection", "time", "baseColor", "reflectance", "emission", "atmosphere", "atmosphereColor", "seaColor", "landPct", "seed", "specularIntensity", "shininess", "cloudDensity", "cloudColor", "lightDir", "ambientColor", "reflectionColor"],
     });
 
     planet.material = planetShader;
@@ -486,7 +477,7 @@ function createPlanet(index, properties) {
     planet.material.setColor3("seaColor", properties.seaColor);
     planet.material.setFloat("landPct", properties.landPct);
     planet.material.setFloat("specularIntensity", 0.5);
-    planet.material.setFloat("roughness", 16.0);
+    planet.material.setFloat("shininess", 16.0);
     planet.material.setFloat("cloudDensity", 0.5);
     planet.material.setVector3("cloudColor", new BABYLON.Vector3(0.8, 0.8, 0.8));
 
@@ -656,6 +647,13 @@ pipeline.bloomThreshold = 0.3;
 pipeline.bloomWeight = 0.7;
 pipeline.bloomKernel = 32; // Reduced for better performance
 pipeline.bloomScale = 0.5;
+
+// Add SSAO using SSAO2RenderingPipeline (ensure to import/use it if needed)
+const ssaoPipeline = new BABYLON.SSAO2RenderingPipeline("ssao", scene, {
+    ssaoRatio: 0.5,
+    blurRatio: 1
+}, [camera]);
+scene.postProcessRenderPipelineManager.attachCamerasToRenderPipeline("ssao", camera);
 
 // Add camera inertia for smooth movement
 camera.inertia = 0.9;
